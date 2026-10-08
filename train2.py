@@ -1,131 +1,131 @@
 import pandas as pd
-import numpy as np
-import itertools
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.pipeline import make_pipeline
-from sklearn.model_selection import KFold, cross_val_score
-from sklearn.metrics import r2_score
+from sklearn.model_selection import KFold, cross_validate
 import warnings
 
 warnings.filterwarnings('ignore')
 
-def load_data(filepath):
-    """Loads data from CSV or Excel depending on the file extension."""
-    if filepath.endswith('.csv'):
-        return pd.read_csv(filepath)
-    elif filepath.endswith(('.xls', '.xlsx')):
-        return pd.read_excel(filepath)
-    else:
-        raise ValueError(f"Unsupported file format for {filepath}. Use .csv or .xlsx")
-
-def optimize_and_predict(train_path, test_path, out_path, max_degree, alphas):
-    print(f"==================================================")
+def optimize_and_predict(train_path, test_path, out_path, plot_out_path, max_degree, alphas, l1_ratios):
     print(f"--- Optimizing model for {train_path} ---")
-    print(f"==================================================")
     
-    train_df = load_data(train_path)
-    test_df = load_data(test_path)
+    train_df = pd.read_csv(train_path)
+    test_df = pd.read_csv(test_path)
     
-    X_train_full = train_df.drop(columns=['y'])
+    X_train = train_df.drop(columns=['y'])
     y_train = train_df['y']
-    features = list(X_train_full.columns)
+    X_test = test_df[X_train.columns]
     
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
     
     overall_best_mse = float('inf')
-    overall_best_params = {}
+    best_params = {}
+    best_model_obj = None
     
-    # Iterate through each degree to print its specific performance
+    plot_degrees = []
+    plot_mses = []
+    
+    model_grid = [('LinearRegression', LinearRegression())]
+    for alpha in alphas:
+        model_grid.append((f'Ridge(alpha={alpha})', Ridge(alpha=alpha, random_state=42, max_iter=5000)))
+        model_grid.append((f'Lasso(alpha={alpha})', Lasso(alpha=alpha, random_state=42, max_iter=5000)))
+        for l1_ratio in l1_ratios:
+            model_grid.append((f'ElasticNet(alpha={alpha}, l1_ratio={l1_ratio})', 
+                               ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42, max_iter=5000)))
+    
+    scoring = {'mse': 'neg_mean_squared_error', 'r2': 'r2'}
+
     for degree in range(1, max_degree + 1):
         best_mse_for_deg = float('inf')
-        best_params_for_deg = {}
+        best_r2_for_deg = -float('inf')
+        best_model_name_for_deg = ""
+        best_model_obj_for_deg = None
         
-        # Test all feature combinations and alphas for this specific degree
-        for r in range(1, len(features) + 1):
-            for subset in itertools.combinations(features, r):
-                # Optimization guard: Skip extremely high dimensional spaces to prevent memory crashes
-                if len(subset) > 3 and degree > 7:
-                    continue
-                    
-                X_sub = X_train_full[list(subset)]
+        for model_name, model in model_grid:
+            pipeline = make_pipeline(
+                PolynomialFeatures(degree=degree, include_bias=False),
+                StandardScaler(),
+                model
+            )
+
+            scores = cross_validate(pipeline, X_train, y_train, cv=kf, scoring=scoring, n_jobs=-1)
+            mse = -scores['test_mse'].mean()
+            r2 = scores['test_r2'].mean()
+            
+            if mse < best_mse_for_deg:
+                best_mse_for_deg = mse
+                best_r2_for_deg = r2
+                best_model_name_for_deg = model_name
+                best_model_obj_for_deg = model
                 
-                for alpha in alphas:
-                    model = make_pipeline(
-                        PolynomialFeatures(degree=degree, include_bias=True),
-                        StandardScaler(),
-                        Ridge(alpha=alpha, random_state=42)
-                    )
+            if mse < overall_best_mse:
+                overall_best_mse = mse
+                best_params = {
+                    'degree': degree, 
+                    'model_name': model_name,
+                    'r2': r2
+                }
+                best_model_obj = model
+        
+        plot_degrees.append(degree)
+        plot_mses.append(best_mse_for_deg)
 
-                    scores = cross_val_score(model, X_sub, y_train, cv=kf, scoring='neg_mean_squared_error')
-                    mse = -scores.mean()
-                    
-                    if mse < best_mse_for_deg:
-                        best_mse_for_deg = mse
-                        best_params_for_deg = {
-                            'features': list(subset), 
-                            'degree': degree, 
-                            'alpha': alpha
-                        }
-        
-        # Now that we have the best parameters for this degree, 
-        # let's train it once on the full dataset to get the R2 score
-        best_features_for_deg = best_params_for_deg['features']
-        deg_model = make_pipeline(
-            PolynomialFeatures(degree=degree, include_bias=True),
-            StandardScaler(),
-            Ridge(alpha=best_params_for_deg['alpha'], random_state=42)
-        )
-        deg_model.fit(X_train_full[best_features_for_deg], y_train)
-        train_predictions = deg_model.predict(X_train_full[best_features_for_deg])
-        train_r2 = r2_score(y_train, train_predictions)
-        
-        # Print the results for this degree
-        print(f"Degree {degree:2d} | Alpha: {best_params_for_deg['alpha']:<5.1f} | CV MSE: {best_mse_for_deg:.3f} | Train R2: {train_r2:.4f}")
-        
-        # Track the overall best across all degrees
-        if best_mse_for_deg < overall_best_mse:
-            overall_best_mse = best_mse_for_deg
-            overall_best_params = best_params_for_deg
+        print(f"Degree {degree:2d} | Best Model: {best_model_name_for_deg:<35} | MSE: {best_mse_for_deg:.3f} | R2: {best_r2_for_deg:.4f}")
 
-    print(f"\n>>> WINNING CONFIGURATION <<<")
-    print(f"  - Best Features: {overall_best_params['features']}")
-    print(f"  - Best Degree:   {overall_best_params['degree']}")
-    print(f"  - Best Alpha:    {overall_best_params['alpha']}")
-    print(f"  - Best CV MSE:   {overall_best_mse:.3f}\n")
+    print(f"\nOptimal values:")
+    print(f"  - Best Model:  {best_params['model_name']}")
+    print(f"  - Best Degree: {best_params['degree']}")
+    print(f"  - Best CV MSE: {overall_best_mse:.3f}")
+    print(f"  - Best CV R2:  {best_params['r2']:.4f}\n")
     
-    # Train the final overall optimal model to make test predictions
-    X_train_opt = X_train_full[overall_best_params['features']]
-    X_test_opt = test_df[overall_best_params['features']]
-    
+    plt.figure(figsize=(8, 5))
+    plt.plot(plot_degrees, plot_mses, marker='o', linestyle='-', color='b')
+    plt.title(f'Cross-Validation MSE vs. Polynomial Degree\n({train_path})')
+    plt.xlabel('Polynomial Degree')
+    plt.yscale('log')
+    plt.ylabel('Cross-Validation MSE (Log Scale)')
+    plt.xticks(range(1, max_degree + 1))
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.axvline(x=best_params['degree'], color='r', linestyle='--', label=f"Best Degree: {best_params['degree']}")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(plot_out_path)
+    plt.close()
+
+
     final_model = make_pipeline(
-        PolynomialFeatures(degree=overall_best_params['degree'], include_bias=True),
+        PolynomialFeatures(degree=best_params['degree'], include_bias=False),
         StandardScaler(),
-        Ridge(alpha=overall_best_params['alpha'], random_state=42)
+        best_model_obj
     )
-    final_model.fit(X_train_opt, y_train)
+    final_model.fit(X_train, y_train)
     
-    predictions = final_model.predict(X_test_opt)
+    predictions = final_model.predict(X_test)
     pd.DataFrame({'y': predictions}).to_csv(out_path, index=False)
     print(f"Saved optimal predictions to {out_path}\n")
 
 if __name__ == "__main__":
+    alpha_grid = [0.01, 0.1, 1.0, 3.0, 10.0, 30.0, 100.0]
+    l1_ratio_grid = [0.2, 0.5, 0.8] 
     
-    alpha_grid = [0.1, 1.0, 3.0, 10.0, 30.0, 100.0]
-    
-    # Note: Remember to change the filenames to match your local files (e.g., IMT2024014)
     optimize_and_predict(
-        train_path="./IMT2024004_train_var1.csv", 
-        test_path="./IMT2024004_test_var1.csv",
-        out_path="./IMT2024004_pred_var1.csv",
-        max_degree=7, 
-        alphas=alpha_grid
+        train_path="IMT2024004_train_var1.csv", 
+        test_path="IMT2024004_test_var1.csv",
+        out_path="IMT2024004_pred_var1.csv",
+        plot_out_path="IMT2024004_plot_var1.png", 
+        max_degree=10, 
+        alphas=alpha_grid,
+        l1_ratios=l1_ratio_grid
     )
     
     optimize_and_predict(
-        train_path="./IMT2024004_train_var2.csv",
-        test_path="./IMT2024004_test_var2.csv",
-        out_path="./IMT2024004_pred_var2.csv",
-        max_degree=14, 
-        alphas=alpha_grid
+        train_path="IMT2024004_train_var2.csv",
+        test_path="IMT2024004_test_var2.csv",
+        out_path="IMT2024004_pred_var2.csv",
+        plot_out_path="IMT2024004_plot_var2.png", 
+        max_degree=20, 
+        alphas=alpha_grid,
+        l1_ratios=l1_ratio_grid
     )
